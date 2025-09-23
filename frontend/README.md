@@ -4,9 +4,9 @@ React-based frontend for the multi-tenant invoice and compliance management syst
 
 ## 🚀 Live Application
 
-**Frontend URL**: [ deployed frontend URL here]
-**Backend API**: [deployed backend URL here]
-**GitHub Repository**: [GitHub repo URL here]
+**Frontend URL**: [ will update deployed frontend URL here]
+**Backend API**: [will update deployed backend URL here]
+**GitHub Repository**: [https://github.com/SOUMIKBERA/invoice-compliance-system.git]
 
 ## 🔐 Demo Credentials
 
@@ -52,7 +52,7 @@ React-based frontend for the multi-tenant invoice and compliance management syst
 ### Installation
 ```bash
 # Clone the repository
-git clone [your-repo-url]
+git clone [https://github.com/SOUMIKBERA/invoice-compliance-system.git]
 cd invoice-compliance-system/frontend
 
 # Install dependencies
@@ -81,7 +81,7 @@ npm run build
 Set the following environment variable in your hosting platform:
 
 ```
-REACT_APP_API_URL=https://your-backend-url.com/api
+REACT_APP_API_URL= will update https://-backend-url.com/api
 ```
 
 ### Deployment Platforms
