@@ -3,6 +3,7 @@ const cors = require('cors');
 const jwt = require('jsonwebtoken');
 const bcrypt = require('bcryptjs');
 const multer = require('multer');
+const { Pool } = require('pg');
 const path = require('path');
 
 const app = express();
@@ -12,6 +13,12 @@ const JWT_SECRET = process.env.JWT_SECRET || 'invoice_mgmt_secure_key_v1';
 app.use(cors());
 app.use(express.json());
 app.use('/uploads', express.static('uploads'));
+
+// PostgreSQL connection
+const pool = new Pool({
+  connectionString: process.env.DATABASE_URL || 'postgresql://postgres:IntoTheWild123@localhost:5432/invoice_system',
+  ssl: process.env.NODE_ENV === 'production' ? { rejectUnauthorized: false } : false
+});
 
 // Configure multer for file uploads
 const storage = multer.diskStorage({
@@ -24,46 +31,80 @@ const storage = multer.diskStorage({
 });
 const upload = multer({ storage });
 
-// In-memory database (replace with PostgreSQL in production)
-let users = [
-  {
-    id: 1,
-    email: 'admin@test.com',
-    password: bcrypt.hashSync('admin123', 10),
-    role: 'admin',
-    name: 'Admin User'
-  },
-  {
-    id: 2,
-    email: 'auditor@test.com',
-    password: bcrypt.hashSync('auditor123', 10),
-    role: 'auditor',
-    name: 'John Auditor',
-    assignedVendors: [3]
-  },
-  {
-    id: 3,
-    email: 'vendor@test.com',
-    password: bcrypt.hashSync('vendor123', 10),
-    role: 'vendor',
-    name: 'ABC Corp',
-    companyName: 'ABC Corporation'
-  }
-];
+// Database initialization
+const initializeDatabase = async () => {
+  try {
+    // Create tables
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS users (
+        id SERIAL PRIMARY KEY,
+        email VARCHAR(255) UNIQUE NOT NULL,
+        password VARCHAR(255) NOT NULL,
+        role VARCHAR(50) NOT NULL,
+        name VARCHAR(255) NOT NULL,
+        company_name VARCHAR(255),
+        assigned_vendors INTEGER[],
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+      )
+    `);
 
-let documents = [
-  {
-    id: 1,
-    vendorId: 3,
-    filename: 'sample-invoice.pdf',
-    category: 'invoice',
-    uploadDate: new Date().toISOString(),
-    status: 'pending'
-  }
-];
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS documents (
+        id SERIAL PRIMARY KEY,
+        vendor_id INTEGER REFERENCES users(id),
+        filename VARCHAR(255) NOT NULL,
+        filepath VARCHAR(255),
+        category VARCHAR(100) NOT NULL,
+        status VARCHAR(50) DEFAULT 'pending',
+        upload_date TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+      )
+    `);
 
-let nextUserId = 4;
-let nextDocId = 2;
+    // Insert default users if they don't exist
+    const adminExists = await pool.query('SELECT * FROM users WHERE email = $1', ['admin@test.com']);
+    if (adminExists.rows.length === 0) {
+      const hashedPassword = bcrypt.hashSync('admin123', 10);
+      await pool.query(
+        'INSERT INTO users (email, password, role, name) VALUES ($1, $2, $3, $4)',
+        ['admin@test.com', hashedPassword, 'admin', 'Admin User']
+      );
+
+      const auditorPassword = bcrypt.hashSync('auditor123', 10);
+      const auditorResult = await pool.query(
+        'INSERT INTO users (email, password, role, name, assigned_vendors) VALUES ($1, $2, $3, $4, $5) RETURNING id',
+        ['auditor@test.com', auditorPassword, 'auditor', 'John Auditor', '{}']
+      );
+
+      const vendorPassword = bcrypt.hashSync('vendor123', 10);
+      const vendorResult = await pool.query(
+        'INSERT INTO users (email, password, role, name, company_name) VALUES ($1, $2, $3, $4, $5) RETURNING id',
+        ['vendor@test.com', vendorPassword, 'vendor', 'ABC Corp', 'ABC Corporation']
+      );
+
+      // Assign vendor to auditor
+      const vendorId = vendorResult.rows[0].id;
+      await pool.query(
+        'UPDATE users SET assigned_vendors = $1 WHERE id = $2',
+        [[vendorId], auditorResult.rows[0].id]
+      );
+
+      // Insert sample document
+      await pool.query(
+        'INSERT INTO documents (vendor_id, filename, category, status) VALUES ($1, $2, $3, $4)',
+        [vendorId, 'sample-invoice.pdf', 'invoice', 'pending']
+      );
+
+      console.log('Default users and data created successfully');
+    }
+
+    console.log('Database initialized successfully');
+  } catch (error) {
+    console.error('Database initialization error:', error);
+  }
+};
+
+// Initialize database on startup
+initializeDatabase();
 
 // Auth middleware
 const authenticateToken = (req, res, next) => {
@@ -85,7 +126,8 @@ const authenticateToken = (req, res, next) => {
 app.post('/api/auth/login', async (req, res) => {
   try {
     const { email, password } = req.body;
-    const user = users.find(u => u.email === email);
+    const result = await pool.query('SELECT * FROM users WHERE email = $1', [email]);
+    const user = result.rows[0];
     
     if (!user || !bcrypt.compareSync(password, user.password)) {
       return res.status(401).json({ message: 'Invalid credentials' });
@@ -100,209 +142,291 @@ app.post('/api/auth/login', async (req, res) => {
     const { password: _, ...userWithoutPassword } = user;
     res.json({ token, user: userWithoutPassword });
   } catch (error) {
+    console.error('Login error:', error);
     res.status(500).json({ message: 'Server error' });
   }
 });
 
 // Get current user
-app.get('/api/auth/me', authenticateToken, (req, res) => {
-  const user = users.find(u => u.id === req.user.id);
-  if (!user) return res.status(404).json({ message: 'User not found' });
-  
-  const { password, ...userWithoutPassword } = user;
-  res.json(userWithoutPassword);
+app.get('/api/auth/me', authenticateToken, async (req, res) => {
+  try {
+    const result = await pool.query('SELECT * FROM users WHERE id = $1', [req.user.id]);
+    if (result.rows.length === 0) {
+      return res.status(404).json({ message: 'User not found' });
+    }
+    
+    const { password, ...userWithoutPassword } = result.rows[0];
+    res.json(userWithoutPassword);
+  } catch (error) {
+    res.status(500).json({ message: 'Server error' });
+  }
 });
 
-// Admin routes
-app.get('/api/admin/dashboard', authenticateToken, (req, res) => {
+// Admin dashboard
+app.get('/api/admin/dashboard', authenticateToken, async (req, res) => {
   if (req.user.role !== 'admin') {
     return res.status(403).json({ message: 'Access denied' });
   }
 
-  const vendors = users.filter(u => u.role === 'vendor');
-  const auditors = users.filter(u => u.role === 'auditor');
-  
-  res.json({
-    totalVendors: vendors.length,
-    totalAuditors: auditors.length,
-    totalDocuments: documents.length,
-    recentActivity: documents.slice(-5)
-  });
+  try {
+    const vendorsResult = await pool.query('SELECT COUNT(*) FROM users WHERE role = $1', ['vendor']);
+    const auditorsResult = await pool.query('SELECT COUNT(*) FROM users WHERE role = $1', ['auditor']);
+    const documentsResult = await pool.query('SELECT COUNT(*) FROM documents');
+    const recentDocs = await pool.query(
+      'SELECT d.*, u.name as vendor_name FROM documents d JOIN users u ON d.vendor_id = u.id ORDER BY d.upload_date DESC LIMIT 5'
+    );
+    
+    res.json({
+      totalVendors: parseInt(vendorsResult.rows[0].count),
+      totalAuditors: parseInt(auditorsResult.rows[0].count),
+      totalDocuments: parseInt(documentsResult.rows[0].count),
+      recentActivity: recentDocs.rows
+    });
+  } catch (error) {
+    console.error('Dashboard error:', error);
+    res.status(500).json({ message: 'Server error' });
+  }
 });
 
 // Create auditor
-app.post('/api/admin/auditors', authenticateToken, (req, res) => {
+app.post('/api/admin/auditors', authenticateToken, async (req, res) => {
   if (req.user.role !== 'admin') {
     return res.status(403).json({ message: 'Access denied' });
   }
 
-  const { name, email, password } = req.body;
-  
-  if (users.find(u => u.email === email)) {
-    return res.status(400).json({ message: 'Email already exists' });
+  try {
+    const { name, email, password } = req.body;
+    
+    const existingUser = await pool.query('SELECT * FROM users WHERE email = $1', [email]);
+    if (existingUser.rows.length > 0) {
+      return res.status(400).json({ message: 'Email already exists' });
+    }
+
+    const hashedPassword = bcrypt.hashSync(password, 10);
+    const result = await pool.query(
+      'INSERT INTO users (name, email, password, role, assigned_vendors) VALUES ($1, $2, $3, $4, $5) RETURNING *',
+      [name, email, hashedPassword, 'auditor', '{}']
+    );
+
+    const { password: _, ...auditorResponse } = result.rows[0];
+    res.status(201).json(auditorResponse);
+  } catch (error) {
+    console.error('Create auditor error:', error);
+    res.status(500).json({ message: 'Server error' });
   }
-
-  const newAuditor = {
-    id: nextUserId++,
-    name,
-    email,
-    password: bcrypt.hashSync(password, 10),
-    role: 'auditor',
-    assignedVendors: []
-  };
-
-  users.push(newAuditor);
-  const { password: _, ...auditorResponse } = newAuditor;
-  res.status(201).json(auditorResponse);
 });
 
 // Create vendor
-app.post('/api/admin/vendors', authenticateToken, (req, res) => {
+app.post('/api/admin/vendors', authenticateToken, async (req, res) => {
   if (req.user.role !== 'admin') {
     return res.status(403).json({ message: 'Access denied' });
   }
 
-  const { name, email, password, companyName } = req.body;
-  
-  if (users.find(u => u.email === email)) {
-    return res.status(400).json({ message: 'Email already exists' });
+  try {
+    const { name, email, password, companyName } = req.body;
+    
+    const existingUser = await pool.query('SELECT * FROM users WHERE email = $1', [email]);
+    if (existingUser.rows.length > 0) {
+      return res.status(400).json({ message: 'Email already exists' });
+    }
+
+    const hashedPassword = bcrypt.hashSync(password, 10);
+    const result = await pool.query(
+      'INSERT INTO users (name, email, password, role, company_name) VALUES ($1, $2, $3, $4, $5) RETURNING *',
+      [name, email, hashedPassword, 'vendor', companyName]
+    );
+
+    const { password: _, ...vendorResponse } = result.rows[0];
+    res.status(201).json(vendorResponse);
+  } catch (error) {
+    console.error('Create vendor error:', error);
+    res.status(500).json({ message: 'Server error' });
   }
-
-  const newVendor = {
-    id: nextUserId++,
-    name,
-    email,
-    password: bcrypt.hashSync(password, 10),
-    role: 'vendor',
-    companyName
-  };
-
-  users.push(newVendor);
-  const { password: _, ...vendorResponse } = newVendor;
-  res.status(201).json(vendorResponse);
 });
 
-// Get all vendors and auditors
-app.get('/api/admin/users', authenticateToken, (req, res) => {
+// Get all users
+app.get('/api/admin/users', authenticateToken, async (req, res) => {
   if (req.user.role !== 'admin') {
     return res.status(403).json({ message: 'Access denied' });
   }
 
-  const vendors = users.filter(u => u.role === 'vendor').map(u => {
-    const { password, ...userWithoutPassword } = u;
-    return userWithoutPassword;
-  });
-  
-  const auditors = users.filter(u => u.role === 'auditor').map(u => {
-    const { password, ...userWithoutPassword } = u;
-    return userWithoutPassword;
-  });
+  try {
+    const vendorsResult = await pool.query('SELECT id, name, email, company_name, created_at FROM users WHERE role = $1', ['vendor']);
+    const auditorsResult = await pool.query('SELECT id, name, email, assigned_vendors, created_at FROM users WHERE role = $1', ['auditor']);
 
-  res.json({ vendors, auditors });
+    res.json({
+      vendors: vendorsResult.rows,
+      auditors: auditorsResult.rows
+    });
+  } catch (error) {
+    console.error('Get users error:', error);
+    res.status(500).json({ message: 'Server error' });
+  }
 });
 
 // Assign vendor to auditor
-app.post('/api/admin/assignments', authenticateToken, (req, res) => {
+app.post('/api/admin/assignments', authenticateToken, async (req, res) => {
   if (req.user.role !== 'admin') {
     return res.status(403).json({ message: 'Access denied' });
   }
 
-  const { auditorId, vendorId } = req.body;
-  const auditor = users.find(u => u.id === auditorId);
-  
-  if (!auditor || auditor.role !== 'auditor') {
-    return res.status(404).json({ message: 'Auditor not found' });
-  }
+  try {
+    const { auditorId, vendorId } = req.body;
+    
+    const auditorResult = await pool.query('SELECT assigned_vendors FROM users WHERE id = $1 AND role = $2', [auditorId, 'auditor']);
+    if (auditorResult.rows.length === 0) {
+      return res.status(404).json({ message: 'Auditor not found' });
+    }
 
-  if (!auditor.assignedVendors) {
-    auditor.assignedVendors = [];
-  }
+    let assignedVendors = auditorResult.rows[0].assigned_vendors || [];
+    if (!assignedVendors.includes(vendorId)) {
+      assignedVendors.push(vendorId);
+    }
 
-  if (!auditor.assignedVendors.includes(vendorId)) {
-    auditor.assignedVendors.push(vendorId);
+    await pool.query('UPDATE users SET assigned_vendors = $1 WHERE id = $2', [assignedVendors, auditorId]);
+    res.json({ message: 'Vendor assigned successfully' });
+  } catch (error) {
+    console.error('Assignment error:', error);
+    res.status(500).json({ message: 'Server error' });
   }
-
-  res.json({ message: 'Vendor assigned successfully' });
 });
 
-// Auditor routes
-app.get('/api/auditor/dashboard', authenticateToken, (req, res) => {
+// Auditor dashboard
+app.get('/api/auditor/dashboard', authenticateToken, async (req, res) => {
   if (req.user.role !== 'auditor') {
     return res.status(403).json({ message: 'Access denied' });
   }
 
-  const auditor = users.find(u => u.id === req.user.id);
-  const assignedVendorIds = auditor.assignedVendors || [];
-  const assignedVendors = users.filter(u => assignedVendorIds.includes(u.id));
-  const vendorDocuments = documents.filter(doc => assignedVendorIds.includes(doc.vendorId));
+  try {
+    const auditorResult = await pool.query('SELECT assigned_vendors FROM users WHERE id = $1', [req.user.id]);
+    const assignedVendorIds = auditorResult.rows[0].assigned_vendors || [];
+    
+    let vendorCount = 0;
+    let totalDocuments = 0;
+    let pendingReviews = 0;
+    let recentDocuments = [];
 
-  res.json({
-    assignedVendors: assignedVendors.length,
-    totalDocuments: vendorDocuments.length,
-    pendingReviews: vendorDocuments.filter(doc => doc.status === 'pending').length,
-    recentDocuments: vendorDocuments.slice(-5)
-  });
-});
+    if (assignedVendorIds.length > 0) {
+      const vendorCountResult = await pool.query(
+        'SELECT COUNT(*) FROM users WHERE id = ANY($1)',
+        [assignedVendorIds]
+      );
+      vendorCount = parseInt(vendorCountResult.rows[0].count);
 
-app.get('/api/auditor/vendors', authenticateToken, (req, res) => {
-  if (req.user.role !== 'auditor') {
-    return res.status(403).json({ message: 'Access denied' });
-  }
+      const documentsResult = await pool.query(
+        'SELECT COUNT(*) FROM documents WHERE vendor_id = ANY($1)',
+        [assignedVendorIds]
+      );
+      totalDocuments = parseInt(documentsResult.rows[0].count);
 
-  const auditor = users.find(u => u.id === req.user.id);
-  const assignedVendorIds = auditor.assignedVendors || [];
-  const assignedVendors = users.filter(u => assignedVendorIds.includes(u.id))
-    .map(u => {
-      const { password, ...userWithoutPassword } = u;
-      return userWithoutPassword;
+      const pendingResult = await pool.query(
+        'SELECT COUNT(*) FROM documents WHERE vendor_id = ANY($1) AND status = $2',
+        [assignedVendorIds, 'pending']
+      );
+      pendingReviews = parseInt(pendingResult.rows[0].count);
+
+      const recentResult = await pool.query(
+        'SELECT d.*, u.name as vendor_name FROM documents d JOIN users u ON d.vendor_id = u.id WHERE d.vendor_id = ANY($1) ORDER BY d.upload_date DESC LIMIT 5',
+        [assignedVendorIds]
+      );
+      recentDocuments = recentResult.rows;
+    }
+
+    res.json({
+      assignedVendors: vendorCount,
+      totalDocuments,
+      pendingReviews,
+      recentDocuments
     });
-
-  res.json(assignedVendors);
+  } catch (error) {
+    console.error('Auditor dashboard error:', error);
+    res.status(500).json({ message: 'Server error' });
+  }
 });
 
-// Vendor routes
-app.get('/api/vendor/dashboard', authenticateToken, (req, res) => {
+// Get assigned vendors for auditor
+app.get('/api/auditor/vendors', authenticateToken, async (req, res) => {
+  if (req.user.role !== 'auditor') {
+    return res.status(403).json({ message: 'Access denied' });
+  }
+
+  try {
+    const auditorResult = await pool.query('SELECT assigned_vendors FROM users WHERE id = $1', [req.user.id]);
+    const assignedVendorIds = auditorResult.rows[0].assigned_vendors || [];
+
+    if (assignedVendorIds.length === 0) {
+      return res.json([]);
+    }
+
+    const vendorsResult = await pool.query(
+      'SELECT id, name, email, company_name FROM users WHERE id = ANY($1)',
+      [assignedVendorIds]
+    );
+
+    res.json(vendorsResult.rows);
+  } catch (error) {
+    console.error('Get assigned vendors error:', error);
+    res.status(500).json({ message: 'Server error' });
+  }
+});
+
+// Vendor dashboard
+app.get('/api/vendor/dashboard', authenticateToken, async (req, res) => {
   if (req.user.role !== 'vendor') {
     return res.status(403).json({ message: 'Access denied' });
   }
 
-  const vendorDocs = documents.filter(doc => doc.vendorId === req.user.id);
-  
-  res.json({
-    totalDocuments: vendorDocs.length,
-    pendingDocs: vendorDocs.filter(doc => doc.status === 'pending').length,
-    approvedDocs: vendorDocs.filter(doc => doc.status === 'approved').length,
-    recentDocuments: vendorDocs.slice(-5)
-  });
-});
-
-// Document routes
-app.get('/api/documents', authenticateToken, (req, res) => {
-  let userDocuments = [];
-
-  if (req.user.role === 'admin') {
-    userDocuments = documents;
-  } else if (req.user.role === 'auditor') {
-    const auditor = users.find(u => u.id === req.user.id);
-    const assignedVendorIds = auditor.assignedVendors || [];
-    userDocuments = documents.filter(doc => assignedVendorIds.includes(doc.vendorId));
-  } else if (req.user.role === 'vendor') {
-    userDocuments = documents.filter(doc => doc.vendorId === req.user.id);
+  try {
+    const totalResult = await pool.query('SELECT COUNT(*) FROM documents WHERE vendor_id = $1', [req.user.id]);
+    const pendingResult = await pool.query('SELECT COUNT(*) FROM documents WHERE vendor_id = $1 AND status = $2', [req.user.id, 'pending']);
+    const approvedResult = await pool.query('SELECT COUNT(*) FROM documents WHERE vendor_id = $1 AND status = $2', [req.user.id, 'approved']);
+    const recentResult = await pool.query('SELECT * FROM documents WHERE vendor_id = $1 ORDER BY upload_date DESC LIMIT 5', [req.user.id]);
+    
+    res.json({
+      totalDocuments: parseInt(totalResult.rows[0].count),
+      pendingDocs: parseInt(pendingResult.rows[0].count),
+      approvedDocs: parseInt(approvedResult.rows[0].count),
+      recentDocuments: recentResult.rows
+    });
+  } catch (error) {
+    console.error('Vendor dashboard error:', error);
+    res.status(500).json({ message: 'Server error' });
   }
-
-  // Add vendor info to documents
-  const documentsWithVendor = userDocuments.map(doc => {
-    const vendor = users.find(u => u.id === doc.vendorId);
-    return {
-      ...doc,
-      vendorName: vendor ? vendor.name : 'Unknown'
-    };
-  });
-
-  res.json(documentsWithVendor);
 });
 
-app.post('/api/documents/upload', authenticateToken, upload.single('file'), (req, res) => {
+// Get documents
+app.get('/api/documents', authenticateToken, async (req, res) => {
+  try {
+    let query = '';
+    let params = [];
+
+    if (req.user.role === 'admin') {
+      query = 'SELECT d.*, u.name as vendor_name FROM documents d JOIN users u ON d.vendor_id = u.id ORDER BY d.upload_date DESC';
+    } else if (req.user.role === 'auditor') {
+      const auditorResult = await pool.query('SELECT assigned_vendors FROM users WHERE id = $1', [req.user.id]);
+      const assignedVendorIds = auditorResult.rows[0].assigned_vendors || [];
+      
+      if (assignedVendorIds.length === 0) {
+        return res.json([]);
+      }
+      
+      query = 'SELECT d.*, u.name as vendor_name FROM documents d JOIN users u ON d.vendor_id = u.id WHERE d.vendor_id = ANY($1) ORDER BY d.upload_date DESC';
+      params = [assignedVendorIds];
+    } else if (req.user.role === 'vendor') {
+      query = 'SELECT d.*, u.name as vendor_name FROM documents d JOIN users u ON d.vendor_id = u.id WHERE d.vendor_id = $1 ORDER BY d.upload_date DESC';
+      params = [req.user.id];
+    }
+
+    const result = await pool.query(query, params);
+    res.json(result.rows);
+  } catch (error) {
+    console.error('Get documents error:', error);
+    res.status(500).json({ message: 'Server error' });
+  }
+});
+
+// Upload document
+app.post('/api/documents/upload', authenticateToken, upload.single('file'), async (req, res) => {
   if (req.user.role !== 'vendor') {
     return res.status(403).json({ message: 'Only vendors can upload documents' });
   }
@@ -311,45 +435,75 @@ app.post('/api/documents/upload', authenticateToken, upload.single('file'), (req
     return res.status(400).json({ message: 'No file uploaded' });
   }
 
-  const newDocument = {
-    id: nextDocId++,
-    vendorId: req.user.id,
-    filename: req.file.originalname,
-    filepath: req.file.path,
-    category: req.body.category || 'other',
-    uploadDate: new Date().toISOString(),
-    status: 'pending'
-  };
+  try {
+    const result = await pool.query(
+      'INSERT INTO documents (vendor_id, filename, filepath, category, status) VALUES ($1, $2, $3, $4, $5) RETURNING *',
+      [req.user.id, req.file.originalname, req.file.path, req.body.category || 'other', 'pending']
+    );
 
-  documents.push(newDocument);
-  res.status(201).json(newDocument);
+    res.status(201).json(result.rows[0]);
+  } catch (error) {
+    console.error('Upload error:', error);
+    res.status(500).json({ message: 'Server error' });
+  }
 });
 
 // Update document status
-app.put('/api/documents/:id/status', authenticateToken, (req, res) => {
+app.put('/api/documents/:id/status', authenticateToken, async (req, res) => {
   if (req.user.role !== 'auditor' && req.user.role !== 'admin') {
     return res.status(403).json({ message: 'Access denied' });
   }
 
-  const docId = parseInt(req.params.id);
-  const { status } = req.body;
-  const document = documents.find(doc => doc.id === docId);
-
-  if (!document) {
-    return res.status(404).json({ message: 'Document not found' });
-  }
-
-  // Check if auditor has access to this document
-  if (req.user.role === 'auditor') {
-    const auditor = users.find(u => u.id === req.user.id);
-    const assignedVendorIds = auditor.assignedVendors || [];
-    if (!assignedVendorIds.includes(document.vendorId)) {
-      return res.status(403).json({ message: 'Access denied' });
+  try {
+    const docId = parseInt(req.params.id);
+    const { status } = req.body;
+    
+    const documentResult = await pool.query('SELECT * FROM documents WHERE id = $1', [docId]);
+    if (documentResult.rows.length === 0) {
+      return res.status(404).json({ message: 'Document not found' });
     }
-  }
 
-  document.status = status;
-  res.json(document);
+    const document = documentResult.rows[0];
+
+    // Check if auditor has access to this document
+    if (req.user.role === 'auditor') {
+      const auditorResult = await pool.query('SELECT assigned_vendors FROM users WHERE id = $1', [req.user.id]);
+      const assignedVendorIds = auditorResult.rows[0].assigned_vendors || [];
+      
+      if (!assignedVendorIds.includes(document.vendor_id)) {
+        return res.status(403).json({ message: 'Access denied' });
+      }
+    }
+
+    const updatedResult = await pool.query(
+      'UPDATE documents SET status = $1 WHERE id = $2 RETURNING *',
+      [status, docId]
+    );
+
+    res.json(updatedResult.rows[0]);
+  } catch (error) {
+    console.error('Update document status error:', error);
+    res.status(500).json({ message: 'Server error' });
+  }
+});
+
+// Test database connection
+app.get('/api/health', async (req, res) => {
+  try {
+    const result = await pool.query('SELECT NOW()');
+    res.json({ 
+      status: 'healthy', 
+      database: 'connected',
+      timestamp: result.rows[0].now 
+    });
+  } catch (error) {
+    console.error('Health check error:', error);
+    res.status(500).json({ 
+      status: 'unhealthy', 
+      database: 'disconnected',
+      error: error.message 
+    });
+  }
 });
 
 app.listen(PORT, () => {
