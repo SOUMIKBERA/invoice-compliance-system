@@ -33,10 +33,15 @@ Test the system with these pre-configured accounts:
 - **bcryptjs** - Password hashing
 - **Multer** - File upload handling
 
-##  Local Setup Instructions
+### Database
+- **PostgreSQL 16.3** - Production-grade database
+- **pg ^8.16.3** - Node.js PostgreSQL client
+
+## 🚀 Local Setup Instructions
 
 ### Prerequisites
 - Node.js (v14 or higher)
+- PostgreSQL 16.3 (or compatible version)
 - npm
 
 ### 1. Clone Repository
@@ -45,7 +50,15 @@ git clone https://github.com/SOUMIKBERA/invoice-compliance-system.git
 cd invoice-compliance-system
 ```
 
-### 2. Backend Setup
+### 2. Database Setup
+```bash
+# Create PostgreSQL database
+psql -U postgres
+CREATE DATABASE invoice_system;
+\q
+```
+
+### 3. Backend Setup
 ```bash
 cd backend
 npm install
@@ -55,13 +68,14 @@ mkdir uploads
 echo NODE_ENV=development > .env
 echo JWT_SECRET=invoice_mgmt_secure_key_v1 >> .env
 echo PORT=5000 >> .env
+echo DATABASE_URL=postgresql://postgres:your_password@localhost:5432/invoice_system >> .env
 
 # Start backend server
 npm start
 ```
 Backend runs on `http://localhost:5000`
 
-### 3. Frontend Setup
+### 4. Frontend Setup
 ```bash
 cd ../frontend
 npm install
@@ -74,6 +88,9 @@ npm start
 ```
 Frontend runs on `http://localhost:3000`
 
+### 5. Database Initialization
+The application automatically creates tables and seeds default users on first run.
+
 ## ⚙️ Environment Configuration
 
 ### Backend (.env)
@@ -81,6 +98,9 @@ Frontend runs on `http://localhost:3000`
 NODE_ENV=development
 JWT_SECRET=invoice_mgmt_secure_key_v1
 PORT=5000
+
+# PostgreSQL connection
+DATABASE_URL=postgresql://postgres:your_password@localhost:5432/invoice_system
 ```
 
 ### Frontend (.env)
@@ -89,9 +109,16 @@ REACT_APP_API_URL=http://localhost:5000/api
 ```
 
 ### For Production Deployment
-- Update `NODE_ENV=production` in backend
-- Update `REACT_APP_API_URL` to deployed backend URL
-- Keep the same JWT_SECRET for consistency
+```env
+# Backend production
+NODE_ENV=production
+JWT_SECRET=invoice_mgmt_secure_key_v1
+PORT=5000
+DATABASE_URL=postgresql://username:password@host:port/database
+
+# Frontend production
+REACT_APP_API_URL=https://your-backend-url.com/api
+```
 
 ## 📱 Key Features
 
@@ -99,6 +126,7 @@ REACT_APP_API_URL=http://localhost:5000/api
 - **Complete data isolation** between vendors
 - **Role-based access control** with three distinct user types
 - **Secure tenant boundaries** ensuring privacy and compliance
+- **PostgreSQL schema design** for scalable multi-tenancy
 
 ### 👥 User Management
 - **Admin**: System administration, user onboarding, vendor-auditor assignments
@@ -110,11 +138,41 @@ REACT_APP_API_URL=http://localhost:5000/api
 - **Status tracking** (pending, approved, rejected)
 - **Document history** and audit trails
 - **Multi-format support** (PDF, DOC, images)
+- **Database-backed persistence**
 
 ### 📊 Analytics Dashboards
 - **Real-time statistics** for all user roles
 - **Activity monitoring** and recent document tracking
 - **Performance metrics** and compliance reporting
+
+## 🗃️ Database Schema
+
+### Users Table
+```sql
+CREATE TABLE users (
+  id SERIAL PRIMARY KEY,
+  email VARCHAR(255) UNIQUE NOT NULL,
+  password VARCHAR(255) NOT NULL,
+  role VARCHAR(50) NOT NULL,
+  name VARCHAR(255) NOT NULL,
+  company_name VARCHAR(255),
+  assigned_vendors INTEGER[],
+  created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+```
+
+### Documents Table
+```sql
+CREATE TABLE documents (
+  id SERIAL PRIMARY KEY,
+  vendor_id INTEGER REFERENCES users(id),
+  filename VARCHAR(255) NOT NULL,
+  filepath VARCHAR(255),
+  category VARCHAR(100) NOT NULL,
+  status VARCHAR(50) DEFAULT 'pending',
+  upload_date TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+```
 
 ## 🧪 Testing Scenarios
 
@@ -140,6 +198,11 @@ REACT_APP_API_URL=http://localhost:5000/api
 5. Track approval status
 
 ## 📡 API Documentation
+
+### Health Check
+```http
+GET /api/health              # Database connection status
+```
 
 ### Authentication Endpoints
 ```http
@@ -181,7 +244,7 @@ invoice-compliance-system/
 ├── README.md                 # This file
 ├── backend/                  # Node.js API server
 │   ├── server.js            # Main server application
-│   ├── package.json         # Backend dependencies
+│   ├── package.json         # Backend dependencies (includes pg ^8.16.3)
 │   ├── .env                 # Environment variables
 │   └── uploads/             # File storage directory
 ├── frontend/                # React application
@@ -196,20 +259,23 @@ invoice-compliance-system/
 
 ## 🚀 Deployment Guide
 
-### Option 1: Railway (Recommended)
+### Option 1: Railway (Recommended for PostgreSQL)
 1. Push code to GitHub
-2. Deploy backend on Railway with environment variables
-3. Deploy frontend on Railway with API URL configuration
-4. Update README with live URLs
+2. Deploy backend with PostgreSQL addon
+3. Railway auto-configures DATABASE_URL
+4. Deploy frontend with backend API URL
+5. Update README with live URLs
 
-### Option 2: Render + Netlify
-1. **Backend on Render**: Connect GitHub, add environment variables
-2. **Frontend on Netlify**: Deploy build folder or connect GitHub
+### Option 2: Render + PostgreSQL
+1. **Create PostgreSQL database** on Render
+2. **Deploy backend** with database connection
+3. **Deploy frontend** on Netlify
+4. Configure environment variables
 
-### Option 3: Vercel
-1. Deploy both frontend and backend on Vercel
-2. Configure environment variables
-3. Update CORS settings for production
+### Option 3: Supabase + Vercel
+1. **Use Supabase** for PostgreSQL hosting
+2. **Deploy backend** on Vercel with Supabase connection
+3. **Deploy frontend** on Vercel
 
 ## 🔒 Security Features
 
@@ -219,15 +285,17 @@ invoice-compliance-system/
 - **Input Validation** and sanitization
 - **CORS Configuration** for cross-origin requests
 - **File Upload Restrictions** for security
+- **PostgreSQL injection protection** with parameterized queries
 
 ## 📋 Production Checklist
 
-- [ ] Environment variables configured
+- [ ] PostgreSQL database created and accessible
+- [ ] Environment variables configured with secure DATABASE_URL
 - [ ] CORS origins restricted to production URLs
 - [ ] File upload limits set appropriately
 - [ ] JWT secret is secure and consistent
-- [ ] Error logging implemented
-- [ ] SSL certificates installed (handled by hosting platform)
+- [ ] Database connection pooling configured
+- [ ] SSL/TLS enabled for database connections
 
 ## 🤝 Contributing
 
@@ -249,4 +317,4 @@ This project is licensed under the MIT License.
 
 ---
 
-**Built with modern web technologies and best practices for enterprise-grade applications** 
+**Built with modern web technologies and PostgreSQL for enterprise-grade applications** 
